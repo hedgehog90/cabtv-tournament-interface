@@ -1,0 +1,29 @@
+body {
+    margin: 0;
+    /* height: 100vh; */
+    overflow: auto;
+}
+
+ui-control-panel,
+ui-stream,
+ui-challenge,
+ui-move-buttons,
+ui-button,
+ui-property,
+ui-property-group {
+    display:flex;
+    flex-direction:column;
+}
+
+ui-property-group {
+    border: 1px solid #bbb;
+    padding:5px;
+    margin:5px;
+}
+
+[data-orientation="horizontal"] {
+    flex-direction: row;
+}
+[data-orientation="vertical"] {
+    flex-direction: column;
+}

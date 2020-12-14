@@ -1,0 +1,20 @@
+{
+  "name": "cabtv",
+  "version": "1.0.0",
+  "description": "",
+  "main": "viewer.js",
+  "dependencies": {
+    "flv.js": "^1.5.0",
+    "jquery": "^3.5.1",
+    "node-media-server": "^2.2.4"
+  },
+  "devDependencies": {
+    "electron": "^11.0.2"
+  },
+  "scripts": {
+    "start": "node viewer.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC"
+}

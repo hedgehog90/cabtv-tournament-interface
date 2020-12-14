@@ -1,0 +1,44 @@
+body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    overflow: hidden;
+}
+
+#stage {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    flex-wrap: wrap;
+    max-width: calc(var(--width) * var(--cols));
+}
+
+.video-container {
+    width: var(--width);
+    height: var(--height);
+    background-color: #3a3a3e;
+}
+
+video {
+    outline: none !important;
+    height: 100%;
+    width: 100%;
+}
+
+.fade-in {
+    animation: fade 0.5s ease;
+}
+.fade-out {
+    animation: fade 0.5s ease reverse;
+}
+.display-none{
+    display: none !important;
+}
+
+@keyframes fade {
+    0% {opacity:0; transform:scale(0.1)}
+    100% {opacity:1; transform:scale(1)}
+}
