@@ -1,29 +1,174 @@
+@import '../node_modules/@fortawesome/fontawesome-free/css/all.css';
+
 body {
     margin: 0;
     /* height: 100vh; */
     overflow: auto;
+    font-family: "Lucida Sans Typewriter","Courier New","Courier";
+    font-size:12px;
 }
 
-ui-control-panel,
-ui-stream,
-ui-challenge,
-ui-move-buttons,
-ui-button,
-ui-property,
-ui-property-group {
+h1,h2,h3,h4,h5,h6 {
+    margin: 2px;
+}
+
+pre {
+    margin:0;
+}
+
+.ui {
     display:flex;
     flex-direction:column;
+    margin:2px;
 }
 
-ui-property-group {
-    border: 1px solid #bbb;
-    padding:5px;
-    margin:5px;
+.ui-button {
+    align-items: center;
 }
 
-[data-orientation="horizontal"] {
+.ui-property {
+    justify-content: space-between;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+}
+.ui-property>* {
+    display: flex;
+    flex: 1;
+    width: 0;
+    margin: 0 2px;
+}
+
+.ui>label {
+    /* flex-grow: 0; */
+    display: flex;
+    align-items: center;
+}
+
+.ui-layout>* {
+    /* display: flex; */
+}
+.ui-layout {
+    position:relative;
+    padding:2px;
+    flex-direction: column;
+    overflow: auto;
+}
+.ui-layout.horizontal {
     flex-direction: row;
 }
-[data-orientation="vertical"] {
-    flex-direction: column;
+/* .ui-layout.scroll {
+    overflow:visible auto;
 }
+.ui-layout.scroll.horizontal {
+    overflow:auto visible;
+} */
+.ui-layout.horizontal>* {
+    flex:1;
+}
+
+.ui-box {
+    overflow: auto;
+    border: 1px solid #bbb;
+    position:relative;
+    padding:2px;
+}
+
+.ui-list {
+    border: 1px solid #bbb;
+    position:relative;
+    padding:2px;
+}
+.ui-list>.ui-layout {
+    padding:0;
+    margin:0;
+}
+
+.ui-list>.ui-layout>* {
+    border: 1px solid #bbb;
+}
+
+/* .ui-layout>.ui-button.close {
+    position:absolute;
+    right: 0;
+    top: 0;
+} */
+.ui-list>.ui-layout:empty:after{
+    display: flex;
+    padding: 15px;
+    content: "No Items";
+    justify-content: center;
+    align-items: center;
+}
+.ui-list>.ui-layout.ui-layout:not(.horizontal) {
+    width:100%;
+}
+.ui-list>.ui-layout.ui-layout.horizontal {
+    height:100%;
+}
+
+textarea {
+    flex-grow: 1;
+}
+.display-none{
+    display: none !important;
+}
+
+:root>body>*{
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px;
+    margin: 0;
+    overflow: auto;
+}
+
+.noscroll {
+    overflow: visible !important;
+}
+.grow {
+    flex-grow: 1;
+}
+.shrink {
+    flex-shrink: 1;
+}
+
+/* --------------------------------------- */
+
+.ui.status-box {
+    width: 10px;
+    height: 10px;
+    background: lightgray;
+    border: 1px solid #888;
+    flex: 0 0 auto;
+    align-self: center;
+}
+
+.ui-layout#stream:not(.added), .ui-layout#stream.hidden {
+    background: rgba(0, 0, 0, 0.1);
+}
+.ui-layout#stream.hidden {
+    opacity:0.5;
+}
+.ui-layout#stream.selected {
+    background: rgba(255, 255, 0, 0.15);
+}
+.challenges>#active {
+    background: rgba(0, 0, 255, 0.1);
+}
+.challenges>#inactive {
+    background: rgba(0, 0, 0, 0.1);
+}
+.challenges>#archived {
+    background: rgba(255, 0, 0, 0.1);
+}
+.stream {
+    min-width:300px;
+}
+.challenge {
+    min-width:350px;
+}
+.result {
+    min-width:200px;
+}
+/* --------------------------------------- */

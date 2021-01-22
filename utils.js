@@ -1,7 +1,50 @@
-var maximum_interval_timeouts = new Map();
 const FLT_EPSILON = 1.19209290e-7;
 
+class IntervalCallback {
+    callback;
+    interval;
+    #last_timeout;
+    #destroyed = false;
+    constructor(callback, interval, fire_immediate=false) {
+        this.callback = callback;
+        this.reset(interval, fire_immediate)
+    }
+
+    async reset(interval, fire_immediate=false) {
+        this.#clear_last_timeout();
+        this.interval = interval;
+        if (fire_immediate) this.#tick();
+        else this.#last_timeout = setTimeout(()=>this.#tick(), interval);
+    }
+
+    async tick() {
+        this.#clear_last_timeout();
+        await this.#tick();
+    }
+
+    #clear_last_timeout() {
+        if (this.#last_timeout) clearTimeout(this.#last_timeout);
+    }
+
+    async #tick() {
+        const t = +new Date();
+        this.#last_timeout = null;
+        await Promise.resolve(this.callback.call());
+        if (this.#destroyed || this.#last_timeout) return;
+        var interval = Math.max(0, this.interval - new Date() + t);
+        this.#last_timeout = setTimeout(()=>this.#tick(), interval);
+    }
+
+    destroy() {
+        if (this.#destroyed) return;
+        this.#destroyed = true;
+        this.#clear_last_timeout();
+    }
+}
+
 const utils = {
+
+    IntervalCallback: IntervalCallback,
 
 	is_valid_url: function(str) {
 		return !!/^(?:(?:https?|ftp):\/\/)?(?:(?!(?:10|127)(?:\.\d{1,3}){3})(?!(?:169\.254|192\.168)(?:\.\d{1,3}){2})(?!172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5])){2}(?:\.(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]))|(?:(?:[a-z\u00a1-\uffff0-9]-*)*[a-z\u00a1-\uffff0-9]+)(?:\.(?:[a-z\u00a1-\uffff0-9]-*)*[a-z\u00a1-\uffff0-9]+)*(?:\.(?:[a-z\u00a1-\uffff]{2,})))(?::\d{2,5})?(?:\/\S*)?$/i.test(str);
@@ -139,23 +182,8 @@ const utils = {
         return str.split(search).join(replace);
     },
     
-    set_maximum_interval: function(callback, interval, ...args) {
-        var orig_timeout;
-        async function _set_maximum_interval(callback, interval, ...args) {
-            const t = +new Date();
-            await callback.call(...args);
-            if (maximum_interval_timeouts.get(orig_timeout)) {
-                maximum_interval_timeouts.set(orig_timeout, setTimeout(_set_maximum_interval, Math.max(0, interval - new Date() + t), callback, interval, ...args));
-            }
-        }
-        orig_timeout = setTimeout(_set_maximum_interval, interval, callback, interval, ...args);
-        maximum_interval_timeouts.set(orig_timeout, orig_timeout);
-        return orig_timeout;
-    },
-    
-    clear_maximum_interval: function(timeout) {
-        clearTimeout(maximum_interval_timeouts.get(timeout));
-        maximum_interval_timeouts.delete(timeout);
+    set_maximum_interval: function(...args) {
+        return new IntervalCallback(...args);
     },
     
     shuffle: function(arra1) {
@@ -266,7 +294,9 @@ const utils = {
                 ms_length = p.length;
                 continue;
             }
-            var v = (i < format_parts.length-1) ? Math.floor(num / divider) : Math.round(num / divider);
+            // var v = (i < format_parts.length-1) ? Math.floor(num / divider) : Math.ceil(num / divider);
+            var v = Math.floor(num / divider);
+            // var display_v = ceil ? Math.ceil(num / divider) : v;
             parts.push(v.toString().padStart(p.length,"0"));
             // if (separators[i]) parts.push(separators[i])
             num -= v * divider;
@@ -340,13 +370,32 @@ const utils = {
             }
         }
     },
+
+    round_to_factor: function(num, f=1.0) {
+        return Math.round(num / f) * f;
+    },
     
-    clamp: function(value, min, max) {
-        return Math.min(Math.max(value, min), max);
+    clamp: function(a, min = 0, max = 1) {
+        return Math.min(max, Math.max(min, a));
+    },
+    lerp: function (x, y, a) {
+        return x * (1 - a) + y * a;
+    },
+    invlerp: function (x, y, a) {
+        return utils.clamp((a - x) / (y - x));
+    },
+    range: function (x1, y1, x2, y2, a) {
+        return utils.lerp(x2, y2, utils.invlerp(x1, y1, a));
     },
     
     loop: function(value, length) {
         return (length + value) % length;
+    },
+    
+    sum: function(array) {
+        var total = 0.0;
+        for (var num of array) total += num;
+        return total;
     },
 
     sort(arr, ...cbs) {

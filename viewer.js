@@ -1,10 +1,19 @@
 const path = require('path');
 const electron = require('electron');
 
-// electron.app.disableHardwareAcceleration()
+global.USER_DATA_PATH = electron.app.getPath ('userData');
+console.log(electron.app.getPath('userData'))
+
+electron.app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
+electron.app.commandLine.appendSwitch('enable-features', 'AudioWorkletRealtimeThread');
+electron.app.commandLine.appendArgument("--disable-accelerated-video-decode");
+electron.app.commandLine.appendArgument("--disable-d3d11");
+
+// electron.app.disableHardwareAcceleration();
+// electron.app.commandLine.appendSwitch("disable-software-rasterizer");
+// electron.app.commandLine.appendSwitch("disable-software-rasterizer");
 
 var main_window = null;
-var control_panel_window = null;
 
 function send_client(data) {
     var webContents = null;
@@ -22,16 +31,17 @@ function createWindows() {
             nodeIntegration: true,
             enableRemoteModule: true,
             devTools: true,
-            nativeWindowOpen: true
+            nativeWindowOpen: true,
+            zoomFactor: 1.0
         }
     });
     main_window.openDevTools();
     // window.setMenu(null);
     main_window.setMenuBarVisibility(false);
     main_window.loadFile('html/index.html');
-    main_window.setMenu(
+    /* main_window.setMenu(
         electron.Menu.buildFromTemplate([
-            /* {
+            {
                 label: 'Menu',
                 submenu: [
                     {
@@ -40,7 +50,7 @@ function createWindows() {
                         click: ()=>create_control_panel()
                     }
                 ]
-            }, */
+            },
             {
                 label: 'View',
                 submenu: [
@@ -57,25 +67,24 @@ function createWindows() {
                 ],
             }
         ])
-    );
+    ); */
     main_window.on('closed', () => {
         electron.app.exit();
     });
-    main_window.webContents.on('new-window', (event, url, frameName, disposition, options, additionalFeatures) => {
-        if (frameName === 'Control Panel') {
-            // open window as modal
-            event.preventDefault()
-            Object.assign(options, {
-                nodeIntegration: true,
-                enableRemoteModule: true,
-                devTools: true,
-                nativeWindowOpen: true
-            });
-            event.newGuest = control_panel_window = new electron.BrowserWindow(options)
-            
-            // control_panel_window.setMenu(null);
-        }
-    })
+    
+    /* main_window.webContents.on('new-window', (event, url, frameName, disposition, options, additionalFeatures) => {
+        // open window as modal
+        event.preventDefault()
+        Object.assign(options, {
+            closable: false,
+            nodeIntegration: true,
+            enableRemoteModule: true,
+            devTools: true,
+            nativeWindowOpen: true
+        });
+        event.newGuest = new electron.BrowserWindow(options);
+        event.newGuest.setMenuBarVisibility(false);
+    }) */
       
 }
 
@@ -86,6 +95,9 @@ electron.app.whenReady().then(()=>{
     });
     electron.globalShortcut.register('CommandOrControl+Alt+P', () => {
         main_window.webContents.send("toggle_control_panel")
+    });
+    electron.globalShortcut.register('CommandOrControl+Alt+F', () => {
+        main_window.setFullScreen(!main_window.isFullScreen())
     });
 })
 electron.app.on('window-all-closed', function () {

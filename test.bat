@@ -1,3 +1,2 @@
-FOR /L %%i IN (1,1,4) DO (
-	start cmd /k ffmpeg -re -stream_loop -1 -i "test/%%i.mp4" -preset ultrafast -c:v libx264 -b:v 5000k -tune zerolatency -c:a aac -b:a 160k -f flv rtmp://localhost:1935/live/%%i
-)
+@echo off
+FOR /L %%i IN (1,1,6) DO start cmd /k ffmpeg -re -stream_loop -1 -i "test\%%i.mp4" -preset ultrafast -c:v libx264 -b:v 2500k -tune zerolatency -c:a aac -b:a 160k -vf drawtext=text='%%{e\:t}':fontsize=40:fontcolor=white:x=10:y=10 -flags +global_header -f flv -map 0:v -map 0:a "rtmp://localhost:1935/live/%%i"

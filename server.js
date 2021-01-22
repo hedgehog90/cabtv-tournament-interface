@@ -23,7 +23,6 @@ process.chdir(APP_DIR);
 const nms = new NodeMediaServer({
     rtmp: {
         port: NMS_RTMP_PORT,
-        chunk_size: 4096,
         gop_cache: true,
         ping: 30,
         ping_timeout: 60
