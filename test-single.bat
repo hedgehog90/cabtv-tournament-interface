@@ -1,0 +1,2 @@
+@echo off
+ffmpeg -re -stream_loop -1 -i "test\test.mkv" -preset ultrafast -c:v libx264 -b:v 2500k -tune zerolatency -c:a aac -b:a 160k -vf drawtext=text='%%{e\:t}':fontsize=40:fontcolor=white:x=10:y=10 -flags +global_header -f flv -map 0:v -map 0:a "rtmp://localhost:1935/live/%%i"

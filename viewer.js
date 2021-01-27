@@ -15,12 +15,6 @@ electron.app.commandLine.appendArgument("--disable-d3d11");
 
 var main_window = null;
 
-function send_client(data) {
-    var webContents = null;
-    try { webContents = main_window.webContents; } catch { }
-    if (webContents) webContents.send(data);
-}
-
 function createWindows() {
     main_window = new electron.BrowserWindow({
         width: 1280,

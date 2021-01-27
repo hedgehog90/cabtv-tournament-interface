@@ -1,9 +1,3 @@
-/*
-SETUP:
-DISORD AUDIO OUTPUT DEVICE:    VOICEMEETER VAIO
-INTERFACE AUDIO OUTPUT DEVICE: VOICEMEETER AUX VAIO
-*/
-
 const electron = require('electron');
 const _ = require('lodash');
 const $ = jQuery = require('jquery');
@@ -13,51 +7,73 @@ const events = require("events");
 const path = require("path");
 const Sortable = require("sortablejs");
 const Color = require("color");
-const copy_text_to_clipboard = require('copy-text-to-clipboard');
 const {table} = require('table')
 const Chart = require('chart.js')
-
+const Discord = require("discord.js");
+const humanize_duration = require('humanize-duration')
+const mathjs = require("mathjs");
+const copy_to_clipboard = require('copy-text-to-clipboard');
+// const html_to_image = require("html-to-image");
 const utils = require("../utils");
 const server = require("../server");
-const { shell } = require('electron');
+const discord_config = require("../private/discord-config.json");
 
+const AUTOSAVE_DIR = path.join(electron.remote.getGlobal('USER_DATA_PATH'), "autosaves");
 const WORKLET_PROCESSORS_JS = "worklet-processors.js";
-
-var OFFLINE_TIMER = 5000;
-var autosave_interval = 10*1000;
-var round = null;
-var stage_volume = 1.0;
-var MAX_AUTOSAVE_FILES = 128;
-var AVG_LATENCY_BUFFER_SIZE = 32;
-var LATENCY_ALLOWED_MISALIGNMENT = 100;
-var MIN_PLAYBACK_RATE = 0.5;
-var MAX_PLAYBACK_RATE = 2;
-var SPEED_DIFF_MAX_TIME = 1000;
-var TICK_RATE = 1000/30;
-var MAX_CHART_DATA = 60;
-var LAST_TICK = +new Date();
-var sortable_default_options = {
+const OFFLINE_TIMER = 5000;
+const AUTOSAVE_INTERVAL = 10*1000;
+const MAX_AUTOSAVE_FILES = 128;
+const AVG_LATENCY_BUFFER_SIZE = 32;
+const LATENCY_ALLOWED_MISALIGNMENT = 100;
+const MIN_PLAYBACK_RATE = 0.5;
+const MAX_PLAYBACK_RATE = 2;
+const SPEED_DIFF_MAX_TIME = 1000;
+const TICK_RATE = 1000/30;
+const MAX_CHART_DATA = 60;
+const SORTABLE_DEFAULT_OPTIONS = {
     filter: "input, textarea, button",
     preventOnFilter: false
 }
 
-/* 
-Save/load
-Sound Effects
-Each challenge, enter active streams' positions, Points + any additional points and - penalty points. Button to present. Refresh button to add any missing players.
-Show Timer
-End of round screen with score breakdown, followed by leaderboard with total scores
-Mute at end of round? Reduce volume?
-Beginning of round, show challenge. Timer until round starts.
+const ChallengeStatus = {
+    inactive: [0, "Inactive / Reset"],
+    active_pending: [1, "Active (pending)"],
+    active_starting: [2, "Active (starting)"],
+    active: [3, "Active"],
+    active_finishing: [4, "Active (finishing)"],
+    active_finished: [5, "Active (finished)"],
+    archived: [6, "Archived"],
+    // static pending = 1;
+}
 
-Overall winner screen with video / sound?
-Game Over Yeah end screen.
-*/
+const discord_client = new Discord.Client();
+var discord_client_promise = new Promise((resolve)=>{
+    discord_client.on('ready', () => {
+        console.log("Discord Bot logged in...");
+        resolve();
+    });
+})
+
+discord_client.on("message", async (msg)=>{
+    if (msg.author.bot) return;
+    if (!msg.content.startsWith(prefix)) return;
+
+    const args = msg.content.slice(prefix.length).trim().split(/\s+/g);
+    const command = args.shift().toLowerCase();
+
+    if (command === "scores") {
+        
+    }
+});
+
+discord_client.login(discord_config.bot_token);
 
 const stage = document.getElementById("stage");
 const header = document.getElementById("header");
 const header_title = $(header).find(".title")[0];
-const header_players = $(header).find(".players")[0];
+const header_players_wrapper = $(header).find(".players-wrapper")[0];
+const header_scores = $(header).find("#scores")[0];
+const header_positions = $(header).find("#positions")[0];
 const header_wrapper = header.parentElement;
 const round_timer = document.getElementById("round-timer");
 const round_name = document.getElementById("round-name");
@@ -66,16 +82,18 @@ const footer_game = $(footer).find(".game")[0];
 const footer_info = $(footer).find(".info")[0];
 const footer_wrapper = footer.parentElement;
 const stage_wrapper = stage.parentElement;
-const stage_outer_wrapper = stage_wrapper.parentElement;
 const screens_container = document.getElementById("screens-container");
+
+const STREAMS = new Set();
+const CHALLENGES = new Set();
+const CONTROL_PANELS = new Set();
+const SCREENS = new Set();
+var round = null;
+
 var props = 0;
 var server_streams = {};
-var STREAMS = new Set();
-var CHALLENGES = new Set();
-var CONTROL_PANELS = new Set();
-var SCREENS = new Set();
-
-var autosave_dir = path.join(electron.remote.getGlobal('USER_DATA_PATH'), "autosaves");
+var last_tick = +new Date();
+var stage_volume = 1.0;
 
 // ---------------------------------
 
@@ -84,12 +102,12 @@ function readdir_sorted_by_mtime(dir) {
 }
 function autosave() {
     localStorage.setItem("autosave", JSON.stringify(get_save_data()));
-    var files = readdir_sorted_by_mtime(autosave_dir);
+    var files = readdir_sorted_by_mtime(AUTOSAVE_DIR);
     while (files.length > MAX_AUTOSAVE_FILES) {
-        fs.unlinkSync(path.join(autosave_dir, files[0]));
+        fs.unlinkSync(path.join(AUTOSAVE_DIR, files[0]));
         files.shift();
     }
-    var filepath = path.join(autosave_dir, `${+new Date()}.json`);
+    var filepath = path.join(AUTOSAVE_DIR, `${+new Date()}.json`);
     save_to(filepath);
 }
 function autoload() {
@@ -106,10 +124,6 @@ function get_save_data() {
         streams: Stream.get_streams().map(s=>s.get_data()),
         challenges: Challenge.get_challenges().map(c=>c.get_data())
     }
-}
-
-function code_markdown_wrapper(str) {
-    return "```\n"+str.trim()+"\n```";
 }
 
 function load_save_data(data) {
@@ -158,7 +172,7 @@ function calc_volume(x) {
     return utils.clamp(Math.pow(b,x-1)*a+(1-a),0,1);
 }
 
-function num_to_positional(i) {
+function format_positional(i) {
     var suffix = "th";
     if (i % 10 == 1) suffix = "st";
     else if (i % 10 == 2) suffix = "nd";
@@ -168,24 +182,46 @@ function num_to_positional(i) {
 
 function calculate_scoring(num_players) {
     var scores = [];
-    for (var i = 0; i < num_players; i++) {
+    for (var i = num_players-1; i >= 0; i--) {
         scores.push(i+1);
     }
-    scores[scores.length-1]++;
-    scores.reverse();
+    // scores[0]++;
     return scores;
 }
 
+function calculate_positions(items, score_callback) {
+    items = Array.from(items);
+    utils.sort(items, (e)=>[score_callback(e), "DESCENDING"]); // ensure items are sorted, but won't change anything if in order.
+    var last_pos = 0;
+    var last_score;
+    var map = new Map();
+    items.forEach((item,i)=>{
+        var s = score_callback(item)
+        last_pos = (s==last_score) ? last_pos : i;
+        last_score = s;
+        map.set(item, last_pos);
+    });
+    return map;
+}
+
 function format_score(score) {
-    if (Array.isArray(score)) {
-        var parts = [];
-        for (var i = 0; i < score.length; i++) {
-            if (i === 0) parts.push(format_score(s));
-            else parts.push(s<0?"-":"+", format_score(Math.abs(s)));
-        }
-        return parts.join(" ");
-    }
     return `${score} pts`;
+}
+
+function format_score_breakdown(scores, show_total=false) {
+    var parts = [];
+    var total = 0;
+    if (scores.length === 1) {
+        return format_score(scores[0]);
+    }
+    for (var i = 0; i < scores.length; i++) {
+        var s = scores[i];
+        total += s;
+        if (i === 0) parts.push(format_score(s));
+        else parts.push(s<0?"-":"+", format_score(Math.abs(s)));
+    }
+    if (show_total) parts.unshift(`(${format_score(total)})`)
+    return parts.join(" ");
 }
 
 function nl2br(str, replace='<br>') {
@@ -225,22 +261,22 @@ function table_with_header(header, table_arr) {
     var lines = table(table_arr).split("\n");
     var width = lines[0].length;
     var pleft = Math.max(1, Math.floor((width - header.length-2)/2));
-    var pright = Math.max(1, Math.ceil((width - header.length-2)/2))
+    var pright = Math.max(1, Math.ceil((width - header.length-2)/2));
     var padded_header = " ".repeat(pleft) + header + " ".repeat(pright);
-    if (padded_header.length > width) {
-        for (var i = 0; i < lines.length; i++) {
-            var a = lines[i].substr(0, width-2);
-            var b = lines[i].substr(width-2, 1);
-            var c = lines[i].substr(width-1, 1);
-            lines[i] = a + b.repeat(padded_header.length - width + 3) + c;
-        }
-        width = lines[0].length
+    // if (padded_header.length > width) {
+    for (var i = 0; i < lines.length; i++) {
+        var a = lines[i].substr(0, width-2);
+        var b = lines[i].substr(width-2, 1);
+        var c = lines[i].substr(width-1, 1);
+        lines[i] = a + b.repeat(padded_header.length - width + 3) + c;
     }
+    width = lines[0].length
+    // }
     var top = `╔${"═".repeat(width-2)}╗`;
     var tos = `║${padded_header}║`;
     var tob = `╠${lines[0].substring(1,width-1)}╣`;
 
-    return [top, tos, tob, ...lines.slice(3)].join("\n");
+    return [top, tos, tob, ...lines.slice(1)].join("\n");
 }
 
 function get_chart_js_line_options(length, value_cb) {
@@ -301,6 +337,22 @@ function get_random_color() {
     return "#" + Math.floor(Math.random()*16777215).toString(16);
 }
 
+function code_markdown(str) {
+    return "```\n"+str.trim()+"\n```";
+}
+async function send_to_discord(msg) {
+    await discord_client_promise;
+    discord_client.channels.cache.get(discord_config.channel_id).send(msg);
+}
+
+async function format_discord_big(msg) {
+    var chars = msg.toLowerCase().replace(/\s+/gi, " ").split();
+    return chars.map(c=>{
+        if (c.match(/[a-z]/)) return `:regional_indicator_${c}:`
+        return c;
+    }).join("  ");
+}
+
 function resize_chart(chart, width, height) {
     var update = false;
     if (width != null && width != chart.canvas.width) {
@@ -341,8 +393,8 @@ function set_inner_html(elem, html) {
 }
 
 function toggle_class(elem, clazz, value) {
-    if ($(elem).hasClass(clazz) != value) {
-        $(elem).toggleClass(clazz, value);
+    if (elem.classList.contains(clazz) != value) {
+        elem.classList.toggle(clazz, value);
     }
 }
 
@@ -382,8 +434,8 @@ function create_box() {
 
 function create_time_input(value=null) {
     var input = $(`<input type="text">`)[0];
-    var modifier = (v)=>utils.time_str_to_seconds(v, "hh:mm:ss");
-    var renderer = (v)=>utils.time_to_str(v*1000, "hh:mm:ss");
+    var modifier = (v)=>utils.time_str_to_ms(v, "hh:mm:ss");
+    var renderer = (v)=>utils.time_to_str(v, "hh:mm:ss");
     var orig_val_prop = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value");
     Object.defineProperty(input, 'value', {
         get() {
@@ -403,28 +455,36 @@ function create_time_input(value=null) {
     return input;
 }
 
+function create_range_and_number_input(value, min=null, max=null, step=1) {
+    return ["range","number"].map(type=>`<input type="${type}" min="0" max="1" value="100" step="0.01">`).join("");
+}
+
 function create_property(id, label, html) {
     var element = $(`<div class="ui ui-property"></div>`)[0];
     if (id) element.setAttribute("id", id);
     var name = `prop_${props++}`;
-    var input = $(html)[0];
+    var inputs = $(html).toArray();
     var label_element;
     
     // input.setAttribute("name", id);
-
-    if (input.type.toLowerCase()=="hidden") {
-        element.style.display = "none";
+    for (let input of inputs) {
+        if (input.type.toLowerCase()=="hidden") {
+            element.style.display = "none";
+        }
+        input.setAttribute("id", name);
+        input.addEventListener("input", (e)=>{
+            inputs.filter(i=>i!=input).forEach(i=>i.value=input.value)
+            element.dispatchEvent(new Event("input"));
+        });
+        input.addEventListener("change", (e)=>{
+            inputs.filter(i=>i!=input).forEach(i=>i.value=input.value)
+            element.dispatchEvent(new Event("change"));
+            element.dispatchEvent(new Event("update"));
+            // set_value(element.value, false);
+        });
+        element.append(input);
     }
-    input.setAttribute("id", name);
-    input.addEventListener("input", (e)=>{
-        element.dispatchEvent(new Event("input"));
-    });
-    input.addEventListener("change", (e)=>{
-        element.dispatchEvent(new Event("change"));
-        element.dispatchEvent(new Event("update"));
-        // set_value(element.value, false);
-    });
-    element.append(input);
+    set_label(label);
 
     function set_label(label) {
         if (label_element) label_element.remove();
@@ -434,22 +494,24 @@ function create_property(id, label, html) {
             element.prepend(label_element);
         }
     }
-    set_label(label);
 
     function set_value(value, trigger_change=true) {
         if (element.value == value) return;
-        var node = input.nodeName.toLowerCase()
-        var type = input.type.toLowerCase()
-        if (node === "input" && type === "checkbox") {
-            input.checked = value;
-        } else {
-            input.value = value;
+        for (let input of inputs) {
+            var node = input.nodeName.toLowerCase()
+            var type = input.type.toLowerCase()
+            if (node === "input" && type === "checkbox") {
+                input.checked = value;
+            } else {
+                input.value = value;
+            }
         }
         element.dispatchEvent(new Event("update"));
         if (trigger_change) element.dispatchEvent(new Event("change"));
     }
 
     function get_value() {
+        var input = inputs[0];
         var node = input.nodeName.toLowerCase();
         var type = input.type.toLowerCase();
         var value = input.value;
@@ -466,7 +528,8 @@ function create_property(id, label, html) {
         return value;
     }
 
-    element.input = input;
+    element.input = inputs[0];
+    element.inputs = inputs;
     element.set_label = set_label;
     element.get_value = get_value;
     element.set_value = set_value;
@@ -474,16 +537,18 @@ function create_property(id, label, html) {
         if (!label) label = value;
         var opt = $(`<option value="${value}">${label}</option>`)[0];
         if (selected) toggle_attribute(opt, "selected", true);
-        input.append(opt);
+        inputs[0].append(opt);
     };
     element.remove_options = function(){
-        while (element.length) element.remove(0);
+        while (inputs[0].length) inputs[0].remove(0);
     };
     element.get_options = function(){
-        return $(input).find(">option");
+        return $(inputs[0]).find(">option");
     };
     element.set_disabled = function(value) {
-        toggle_attribute(input, value)
+        for (let input of inputs) {
+            toggle_attribute(input, value)
+        }
     }
 
     Object.defineProperty(element, 'value', {
@@ -495,7 +560,7 @@ function create_property(id, label, html) {
         }
     });
     
-    return element
+    return element;
 }
 
 function create_list(id, label) {
@@ -592,18 +657,17 @@ function create_timer_buttons(timer, label) {
     var reset_button = create_button(null, "Reset", ()=>timer.reset());
     button_group.append(reset_button);
     var pause_toggle_button = create_button(null, "Pause", ()=>{
-        timer.toggle_pause();
+        if (timer.paused) timer.resume();
+        else timer.pause();
         pause_toggle_button.textContent = (timer.paused) ? "Resume" : "Pause"
     });
     button_group.append(pause_toggle_button);
-    var reset_button = create_button(null, "Set To:", ()=>timer.restart(time.value * 1000));
+    var reset_button = create_button(null, "Set To:", ()=>timer.restart(time.value));
     button_group.append(reset_button);
     var time = create_property(null, null, create_time_input());
     button_group.append(time);
     return button_group;
 }
-
-// -------------------------------------------------------
 
 function play_sound(src, vol=1) {
     var audio = new Audio();
@@ -611,6 +675,23 @@ function play_sound(src, vol=1) {
     audio.volume = vol * settings.sfx_volume.value;
     audio.play();
 }
+
+function send_total_scores_to_discord() {
+    var lines = [["#", "Name", "Score"]];
+    Stream.calculate_positions().forEach((s)=>{
+        lines.push([format_positional(s.position+1), s.name.value, format_score(s.score.value)]);
+    });
+
+    var embed = {
+        color: 0x0099ff,
+        title: `Round ${this.round_num} Results`,
+        description: code_markdown(table(lines)),
+    };
+
+    send_to_discord({embed});
+}
+
+// -------------------------------------------------------
 
 class ControlPanelWindow extends events.EventEmitter {
     element;
@@ -663,7 +744,7 @@ class Streams extends ControlPanelWindow {
         this.element.append(list);
         this.layout = list.layout
         this.layout.classList.add("horizontal");
-        Sortable.create(this.layout, sortable_default_options);
+        Sortable.create(this.layout, SORTABLE_DEFAULT_OPTIONS);
     }
 }
 
@@ -681,17 +762,17 @@ class Challenges extends ControlPanelWindow {
 
         this.active_challenges = create_list("active", "Active");
         this.layout.append(this.active_challenges);
-        Sortable.create(this.active_challenges.layout, sortable_default_options);
+        Sortable.create(this.active_challenges.layout, SORTABLE_DEFAULT_OPTIONS);
         this.active_challenges.layout.classList.add("horizontal");
 
         this.inactive_challenges = create_list("inactive", "Inactive");
         this.layout.append(this.inactive_challenges);
-        Sortable.create(this.inactive_challenges.layout, sortable_default_options);
+        Sortable.create(this.inactive_challenges.layout, SORTABLE_DEFAULT_OPTIONS);
         this.inactive_challenges.layout.classList.add("horizontal");
 
         this.archived_challenges = create_list("archived", "Archived");
         this.layout.append(this.archived_challenges);
-        Sortable.create(this.archived_challenges.layout, sortable_default_options);
+        Sortable.create(this.archived_challenges.layout, SORTABLE_DEFAULT_OPTIONS);
         this.archived_challenges.layout.classList.add("horizontal");
 
         this.toggle_archive_btn = create_button(null, "Show / Hide Archive", ()=>{
@@ -709,45 +790,16 @@ class Round extends ControlPanelWindow {
 
     get num_players(){ return Stream.get_added_streams().length; }
 
-    get details_text() {
-        var lines = [];
-        lines.push([`Game`, this.challenge.game.value || "N/A"]);
-        lines.push([`Description`,this.challenge.description.value]);
-        
-        if (this.challenge.is_positional.value) {
-            var parts = calculate_scoring(this.num_players).map((e,i)=>`${num_to_positional(i+1)} = ${format_score(e)}`);
-            lines.push([`Scoring`,parts.join(", ")]);
+    /* get results_text() {
+        var embed = {
+            color: 0x0099ff,
+            title: `Round ${this.round_num} Results`,
+            fields: [],
         }
-        
-        var secondaries = this.challenge.get_secondaries()
-        if (secondaries.length > 0) {
-            var pos = 0;
-            var neg = 0;
-            for (var s of secondaries) {
-                var label = s.score.value > 0 ? `Secondary` : `Penalty`;
-                var num = s.score.value > 0 ? ++pos : ++neg;
-                lines.push([`${label} ${num}`, s.descriptive_text]);
-            }
-        }
-        
-        if (this.challenge.time_limit.value) {
-            lines.push([`Time limit`, utils.time_to_str(this.challenge.time_limit.value * 1000)])
-        }
-        if (this.challenge.run_off_time.value) {
-            lines.push([`Run-off Time`, utils.time_to_str(this.challenge.run_off_time.value * 1000)])
-        }
-        return code_markdown_wrapper(table_with_header(`Round ${this.round_num} Details`, lines))+"\n"+
-        `Round ${this.round_num} will begin in around ${utils.time_to_str(settings.start_round_time.value * 1000)}`+"\n"+
-        `You may load the game but not proceed past the title screen until I say GO`
-    }
-
-    get results_text() {
-        var lines = [];
-        var has_breakdown = false;
         for (var r of this.get_results()) {
             var line = [];
             if (this.challenge.is_positional.value) {
-                line.push(num_to_positional(r.calculate_position()));
+                line.push(format_positional(r.calculate_position()));
             }
             line.push(r.stream.name.value, format_score(r.total_score));
             var breakdown = [];
@@ -760,31 +812,38 @@ class Round extends ControlPanelWindow {
             }
             if (breakdown.length > 1) {
                 has_breakdown = true;
-                line.push(format_score(breakdown))
+                line.push("("+format_score(breakdown)+")")
             }
-            lines.push(line);
+            embed.fields.push({
+                name: line[0],
+                value: line.slice(1).join("\n"),
+                inline: true,
+            });
         }
-        var titles = [];
-        if (this.challenge.is_positional.value) titles.push(`#`);
-        titles.push("Name", "Score");
-        if (has_breakdown) titles.push("Breakdown");
-        make_2d_array_rows_same_length(lines)
-        return code_markdown_wrapper(table_with_header(`Round ${this.round_num} Results`, lines));
-    }
+
+        return {embed};
+    } */
     
     constructor(challenge) {
         settings.round_num.value++;
         var round_num = settings.round_num.value
         super(`Round ${round_num}`);
         this.round_num = round_num;
+
+        this.timer.on("second", (seconds_left)=>{
+            if (seconds_left === 10*60) send_to_discord("10 minutes left...")
+            else if (seconds_left === 5*60) send_to_discord("5 minutes left...")
+            else if (seconds_left === 1*60) send_to_discord("1 minute left...")
+            else if (seconds_left === 0) send_to_discord(format_discord_big("STOP"));
+        })
         
-        if (window.round) window.round.destroy();
-        window.round = this;
+        if (round) round.destroy();
+        round = this;
         
         this.challenge = challenge;
         this.results_list = create_list("results", "Results");
         this.results_list.layout.classList.add("horizontal");
-        Sortable.create(this.results_list.layout, sortable_default_options);
+        Sortable.create(this.results_list.layout, SORTABLE_DEFAULT_OPTIONS);
         this.layout.append(this.results_list);
 
         this.refresh_players_button = create_button(null, "Refresh Players", ()=>this.init_results());
@@ -799,9 +858,9 @@ class Round extends ControlPanelWindow {
 
         var btn_group = create_layout();
         btn_group.classList.add("horizontal", "noscroll");
-        this.details_button = create_button(null, `Copy Details to Clipboard`, ()=>copy_text_to_clipboard(this.details_text));
+        this.details_button = create_button(null, `Send Details to Discord`, ()=>this.send_details_to_discord());
         btn_group.append(this.details_button)
-        this.results_button = create_button(null, `Copy Results to Clipboard`, ()=>copy_text_to_clipboard(this.results_text));
+        this.results_button = create_button(null, `Send Results to Discord`, ()=>this.send_results_to_discord());
         btn_group.append(this.results_button)
         this.layout.append(btn_group)
         
@@ -817,37 +876,142 @@ class Round extends ControlPanelWindow {
             var time_limit = utils.time_str_to_ms(challenge.time_limit.value);
             var run_off_time = utils.time_str_to_ms(challenge.run_off_time.value);
 
-            if (value == ChallengeStatus.inactive) {
+            if (value == ChallengeStatus.inactive[0]) {
                 this.timer.restart(0);
                 this.destroy();
-            } else if (value == ChallengeStatus.active_pending) {
-                this.timer.restart(settings.start_round_time.value * 1000);
+            } else if (value == ChallengeStatus.active_pending[0]) {
+                this.timer.restart(settings.start_round_time.value);
                 this.details_screen = new ChallengeDetailsScreen(this);
-                copy_text_to_clipboard(this.details_text)
-            } else if (value == ChallengeStatus.active) {
+                this.send_details_to_discord();
+            } else if (value == ChallengeStatus.active_starting[0]) {
                 this.start_screen = new ChallengeStartScreen(this);
                 this.timer.restart(0);
                 this.start_screen.once("go", ()=>{
-                    this.timer.restart(time_limit)
+                    this.timer.restart(time_limit);
                 });
-            } else if (value == ChallengeStatus.active_finishing) {
+            } else if (value == ChallengeStatus.active[0]) {
+                // do nowt but wait
+            } else if (value == ChallengeStatus.active_finishing[0]) {
                 if (run_off_time > 0 && run_off_time < this.timer.time_left) {
                     this.timer.restart(run_off_time);
                 }
-            } else if (value == ChallengeStatus.active_finished) {
+            } else if (value == ChallengeStatus.active_finished[0]) {
                 this.timer.restart(0);
-                this.results_screen = new ChallengeResultsScreen(this);
-                copy_text_to_clipboard(this.results_text)
-            } else if (value == ChallengeStatus.archived) {
+                this.results_screen = new RoundResultsScreen(this);
+                this.send_results_to_discord();
+            } else if (value == ChallengeStatus.archived[0]) {
                 this.timer.restart(0);
-                for (var r of this.get_results()) {
-                    r.stream.score.value += r.total_score;
-                }
+                this.apply_scores();
                 this.destroy();
             }
         };
 
         challenge.on("status_change", this.on_status_change);
+    }
+
+    calculate_positions(results) {
+        var map;
+        results.forEach(r=>r._position=-1);
+        if (this.challenge.is_positional.value) {
+            var last_position = 0;
+            map = new Map();
+            results.forEach((r,i)=>{
+                last_position = r.position_joint_above.value ? last_position : i;
+                map.set(r,last_position);
+            })
+        } else {
+            map = calculate_positions(results, r=>r.total_score);
+        }
+        results.forEach(r=>r._position=map.get(r));
+    }
+
+    send_details_to_discord() {
+        var embed = {
+            color: 0x0099ff,
+            title: `Round ${this.round_num} Details`,
+            fields: [
+                {
+                    name: 'Game',
+                    value: this.challenge.game.value || "N/A",
+                },
+                {
+                    name: 'Description',
+                    value: this.challenge.description.value || "N/A",
+                },
+            ],
+            footer: {
+                text: `Round ${this.round_num} will begin in around ${humanize_duration(settings.start_round_time.value)}`+"\n"+
+                `You may load the game but not proceed past the title screen until I say GO`
+            }
+        };
+        
+        if (this.challenge.is_positional.value) {
+            var parts = calculate_scoring(this.num_players).map((e,i)=>`${format_positional(i+1)} = ${format_score(e)}`);
+            embed.fields.push({
+                name: 'Scoring',
+                value: parts.join(", "),
+            });
+        }
+        
+        var secondaries = this.challenge.get_secondaries()
+        if (secondaries.length > 0) {
+            var pos = 0;
+            var neg = 0;
+            for (var s of secondaries) {
+                var label = s.score.value > 0 ? `Secondary` : `Penalty`;
+                var num = s.score.value > 0 ? ++pos : ++neg;
+                embed.fields.push({
+                    name: `${label} ${num}`,
+                    value: s.descriptive_text
+                });
+            }
+        }
+        
+        if (this.challenge.time_limit.value) {
+            embed.fields.push({
+                name: `Time limit`,
+                value: humanize_duration(this.challenge.time_limit.value)
+            });
+        }
+        if (this.challenge.run_off_time.value) {
+            embed.fields.push({
+                name: `Run-off Time`,
+                value: humanize_duration(this.challenge.run_off_time.value)
+            });
+        }
+        send_to_discord({embed});
+    }
+    
+    send_results_to_discord() {
+        var keys = {
+            position: "#",
+            name: "Name",
+            score: "Score",
+        }
+        
+        var rows = [];
+        rows.push(Object.values(keys));
+        var results = this.get_results();
+        this.calculate_positions(results);
+        results = results.map(r=>{
+            var position = format_positional(r.position+1);
+            var name = r.stream.name.value;
+            var score = format_score_breakdown(r.score_breakdown, true);
+            return {
+                position,
+                name,
+                score,
+            };
+        });
+        for (var r of results) {
+            rows.push(Object.keys(keys).map(k=>r[k]));
+        }
+        var embed = {
+            color: 0x0099ff,
+            title: `Round ${this.round_num} Results`,
+            description: code_markdown(table(rows)),
+        }
+        send_to_discord({embed});
     }
 
     get_result_from_stream(stream) {
@@ -859,11 +1023,20 @@ class Round extends ControlPanelWindow {
     }
 
     get_results() {
+        var results = Array.from(this.results);
         if (this.challenge.is_positional.value) {
-            return Array.from(this.results).sort((a,b)=>a.index-b.index);
+            results.sort((a,b)=>a.index-b.index);
         } else {
-            return  Array.from(this.results).sort(a,b=>b.total_score-a.total_score);
+            results.sort(a,b=>b.total_score-a.total_score);
         }
+        return results;
+    }
+
+    apply_scores() {
+        for (var r of this.get_results()) {
+            r.stream.score.value += r.total_score;
+        }
+        send_total_scores_to_discord();
     }
 
     init_results() {
@@ -877,12 +1050,14 @@ class Round extends ControlPanelWindow {
 
     update() {
         for (var r of this.results) r.update();
-        this.proceed_button.textContent = this.challenge.proceed_button.textContent
+        this.proceed_button.textContent = this.challenge.proceed_button.textContent;
+        // if (this.timer.time_left < 60*1000)
     }
 
     destroy() {
         super.destroy();
-        window.round = null;
+        this.timer.pause();
+        round = null;
         if (this.details_screen) this.details_screen.destroy();
         if (this.start_screen) this.start_screen.destroy();
         if (this.results_screen) this.results_screen.destroy();
@@ -900,19 +1075,6 @@ class Settings extends ControlPanelWindow {
         } catch {
             return 4/3;
         }
-    }
-    
-    get score_totals_text() {
-        var lines = [["#", "Name", "Total Score"]];
-        var prev_score = null;
-        var prev_pos = null;
-        Stream.get_added_streams().sort((a,b)=>b.score.value-a.score.value).forEach((s,i)=>{
-            var pos = (s.score.value === prev_score) ? prev_pos : i+1;
-            lines.push([num_to_positional(pos), s.name.value, format_score(s.score.value)]);
-            prev_score = s.score.value;
-            prev_pos = pos;
-        });
-        return code_markdown_wrapper(table_with_header("TOTAL SCORES", lines))
     }
     
     voice_input_rms = 0;
@@ -951,7 +1113,7 @@ class Settings extends ControlPanelWindow {
         this.select_volume_fade_time = create_property("select_volume_fade_time", `Select Volume Fade Time (ms)`, `<input type="number" value="500" step="100" min="0" max="5000">`);
         this.properties.append(this.select_volume_fade_time);
 
-        this.start_round_time = create_property("start_round_time", `Start Round Time`, create_time_input(30));
+        this.start_round_time = create_property("start_round_time", `Start Round Time`, create_time_input(30*1000));
         this.properties.append(this.start_round_time);
 
         this.zoom_factor = create_property("zoom_factor", `Zoom Factor`, `<input type="number" value="1" step="0.05" min="0.5" max="10">`);
@@ -960,27 +1122,31 @@ class Settings extends ControlPanelWindow {
         this.adapt_to_window_size = create_property("adapt_to_window_size", `Adapt to Window Size`, `<input type="checkbox" checked>`);
         this.properties.append(this.adapt_to_window_size);
 
-        this.stage_volume = create_property("stage_volume", "Global Stream Volume", `<input type="range" min="0" max="1" value="100" step="0.01">`);
+        this.stage_volume = create_property("stage_volume", "Global Stream Volume", create_range_and_number_input(1, 0, 1, 0.01));
         this.properties.append(this.stage_volume);
         
-        this.stage_volume_screen = create_property("stage_volume_screen", "Volume % During Screen", `<input type="range" min="0" max="1" value="0.25" step="0.01">`);
+        this.stage_volume_screen = create_property("stage_volume_screen", "Volume % During Screen", create_range_and_number_input(0.25, 0, 1, 0.01));
         this.properties.append(this.stage_volume_screen);
         
         this.average_volume_multiple_selected = create_property("average_volume_multiple_selected", "Averagize volume multiple selected", `<input type="checkbox" checked>`);
         this.properties.append(this.average_volume_multiple_selected);
         
-        this.sfx_volume = create_property("sfx_volume", "SFX Volume", `<input type="range" min="0" max="1" value="0.80" step="0.01">`);
+        this.sfx_volume = create_property("sfx_volume", "SFX Volume", create_range_and_number_input(0.8, 0, 1, 0.01));
         this.properties.append(this.sfx_volume);
 
-        this.header_title_duration = create_property("header_title_duration", "Header Title Duration", create_time_input(5));
+        this.header_title_duration = create_property("header_title_duration", "Header Title Duration", create_time_input(5*1000));
         this.header_title_duration.addEventListener("change", ()=>update_header());
         this.properties.append(this.header_title_duration);
 
-        this.header_scores_duration = create_property("header_scores_duration", `Header Score Duration`, create_time_input(30));
+        this.header_scores_duration = create_property("header_scores_duration", `Header Score Duration`, create_time_input(30*1000));
         this.header_scores_duration.addEventListener("change", ()=>update_header());
         this.properties.append(this.header_scores_duration);
 
-        this.footer_title_duration = create_property("footer_title_duration", "Footer Title Duration", create_time_input(5));
+        this.header_positions_duration = create_property("header_positions_duration", `Header Position Duration`, create_time_input(5*1000));
+        this.header_positions_duration.addEventListener("change", ()=>update_header());
+        this.properties.append(this.header_positions_duration);
+
+        this.footer_title_duration = create_property("footer_title_duration", "Footer Title Duration", create_time_input(5*1000));
         this.footer_title_duration.addEventListener("change", ()=>update_footer());
         this.properties.append(this.footer_title_duration);
 
@@ -1005,10 +1171,7 @@ class Settings extends ControlPanelWindow {
 
         //--------
 
-        this.copy_scores_btn = create_button(null, "Copy Total Scores to Clipboard", ()=>copy_text_to_clipboard(this.score_totals_text));
-        this.properties.append(this.copy_scores_btn);
-
-        this.copy_scores_btn = create_button(null, "Copy GO to Clipboard", ()=>copy_text_to_clipboard(":regional_indicator_g: :regional_indicator_o:"));
+        this.copy_scores_btn = create_button(null, "Send Total Scores to Discord", ()=>send_total_scores_to_discord());
         this.properties.append(this.copy_scores_btn);
 
         this.screen_opacity = create_property("screen_opacity", `Screen Opacity`, `<input type="range" value="1" step="0.01" min="0" max="1">`);
@@ -1029,7 +1192,7 @@ class Settings extends ControlPanelWindow {
         group.append(this.save_button);
         this.properties.append(group);
 
-        this.app_volume_prefs = create_button(null, "App volume device preferences", ()=>shell.openPath("ms-settings:apps-volume"));
+        this.app_volume_prefs = create_button(null, "App volume device preferences", ()=>electron.shell.openPath("ms-settings:apps-volume"));
         this.properties.append(this.app_volume_prefs);
 
         this.layout.append(this.properties);
@@ -1127,7 +1290,7 @@ class Stream {
 
     #added_to_stage = false;
     #per_second_interval_id = null;
-
+    #position = -1;
     get added_to_stage() { return this.#added_to_stage; }
     get index() { return $(this.properties).index(); }
     get id() { return this._id.value; }
@@ -1146,7 +1309,7 @@ class Stream {
     }
     
     static get_streams() {
-        return Array.from(STREAMS).sort((a,b)=>a.index-b.index);
+        return utils.sort(Array.from(STREAMS), s=>s.index, s=>s.name.value.toLowerCase());
     }
     
     static get_added_streams() {
@@ -1161,9 +1324,12 @@ class Stream {
         return Stream.get_streams().filter(s=>s.added.value && s.selected.value && !s.mute.value);
     }
 
-    get is_buffering() {
-        if (!this.video) return null;
-        return this.video.readyState < this.video.HAVE_FUTURE_DATA;
+    static calculate_positions() {
+        STREAMS.forEach(s=>s.#position=-1);
+        var streams = Stream.get_added_streams();
+        var positions_map = calculate_positions(streams, s=>s.score.value)
+        streams.forEach((s)=>s.#position=positions_map.get(s));
+        return streams;
     }
 
     constructor(id) {
@@ -1279,24 +1445,25 @@ class Stream {
 
         // -------------------------------------
 
-        this.stage_element = $(`<div class="stream-container" data-id="${id}"></div>`)[0];
-        this.outer_container_element = $(`<div class="outer-container"></div>`)[0];
-        this.inner_container_element = $(`<div class="inner-container"></div>`)[0];
+        this.stream_container = $(`<div class="stream-container" data-id="${id}"></div>`)[0];
+        this.stream_element = $(`<div class="stream"></div>`)[0];
+        this.stream_container.append(this.stream_element);
+        this.video_wrapper = $(`<div class="video-wrapper"></div>`)[0];
+        this.stream_element.append(this.video_wrapper)
         this.overlay_element = $(`<div class="overlay"></div>`)[0];
         this.offline_element = $(`<div class="offline">OFFLINE</div>`)[0];
         this.overlay_element.append(this.offline_element);
         this.info_element = $(`<span class="info"></span>`)[0];
         this.overlay_element.append(this.info_element);
-        this.inner_container_element.append(this.overlay_element);
-        this.outer_container_element.append(this.inner_container_element);
+        this.stream_element.append(this.overlay_element);
 
         this.loader = $(`<div class="loader"><div><div></div><div></div><div></div></div></div>`)[0];
-        this.overlay_element.append(this.loader)
+        this.overlay_element.append(this.loader);
 
         this.video = document.createElement("video");
         // this.video.preservesPitch = false;
         this.video.muted = this.mute.value;
-        this.inner_container_element.append(this.video);
+        this.video_wrapper.append(this.video);
         
         this.audio_context = new AudioContext();
         var source = this.audio_context.createMediaElementSource(this.video);
@@ -1321,7 +1488,7 @@ class Stream {
         this.video.addEventListener('progress', ()=>{
         });
 
-        this.stage_element.addEventListener("click", (e)=>{
+        this.stream_container.addEventListener("click", (e)=>{
             if (e.shiftKey) this.selected.value = !this.selected.value;
             else this.select();
         });
@@ -1331,11 +1498,24 @@ class Stream {
         this.header_score_element = $(`<div class="score"></div>`)[0];
         this.header_element.append(this.header_name_element);
         this.header_element.append(this.header_score_element);
+
+        this.header_element2 = $(`<div class="player"></div>`)[0];
+        this.header_name_element2 = $(`<div class="name"></div>`)[0];
+        this.header_score_element2 = $(`<div class="position"></div>`)[0];
+        this.header_element2.append(this.header_name_element2);
+        this.header_element2.append(this.header_score_element2);
         
         STREAMS.add(this);
 
         this.#per_second_interval_id = setInterval(()=>this.#per_second(), 1000);
     }
+
+    get is_buffering() {
+        if (!this.video) return null;
+        return this.video.readyState < this.video.HAVE_FUTURE_DATA;
+    }
+
+    get position() { return this.#position; }
 
     static from(data) {
         var s = Stream.fetch(data.id);
@@ -1352,9 +1532,9 @@ class Stream {
         if (this.#added_to_stage) return;
         this.#added_to_stage = true;
 
-        this.stage_element.append(this.outer_container_element);
-        stage.append(this.stage_element);
-        header_players.append(this.header_element);
+        stage.append(this.stream_container);
+        header_scores.append(this.header_element);
+        header_positions.append(this.header_element2);
 
         this.init_video();
     }
@@ -1371,12 +1551,9 @@ class Stream {
             this.video.removeAttribute('src');
         }
 
-        if (this.stage_element) {
-            this.stage_element.remove();
-        }
-        if (this.header_element) {
-            this.header_element.remove();
-        }
+        this.stream_container.remove();
+        this.header_element.remove();
+        this.header_element2.remove();
     }
 
     async init_video() {
@@ -1479,10 +1656,6 @@ class Stream {
 
             set_style_property(this.status_light, "background-color", this.is_buffering ? "#f00" : "#0f0");
 
-            // var rate_delta = this.target_rate - this.video.playbackRate;
-            // if (Math.abs(rate_delta) < 0.01) this.video.playbackRate = this.target_rate;
-            // else this.video.playbackRate += rate_delta * 0.2;
-
             if (this.video.muted != this.mute.value) {
                 this.video.muted = this.mute.value;
             }
@@ -1490,21 +1663,20 @@ class Stream {
             target_volume *= settings.stage_volume.value * stage_volume;
             var num_audible_streams = Stream.get_audible_streams().length;
             if (settings.average_volume_multiple_selected.value && num_audible_streams > 0) {
-                // var str = Stream.get_streams();
-                // target_volume *= 1-Math.pow(Math.log10(num_audible_streams),1.5);
                 target_volume *= calc_volume(num_audible_streams);
             }
             var volume_delta = delta / settings.select_volume_fade_time.value;
-
-            var orig_real_volume = this.real_volume.value;
-            var new_real_volume = move_to(orig_real_volume, target_volume, volume_delta);
-            this.real_volume.value = new_real_volume;
+            this.real_volume.value = move_to(this.real_volume.value, target_volume, volume_delta);
             if (this.volume_filter) {
-                this.volume_filter.parameters.get("volume").value = new_real_volume;
+                this.volume_filter.parameters.get("volume").value = this.real_volume.value;
                 this.video.volume = 1.0;
             } else {
-                this.video.volume = this.real_volume.value
+                this.video.volume = this.real_volume.value;
             }
+
+            var color2 = Color(this.color.value);
+            if (color2.isLight()) color2 = color2.darken(0.1);
+            else color2 = color2.lighten(0.2);
             
             set_style_property(this.video, "width", `${this.scale.value}%`);
             set_style_property(this.video, "height", `${this.scale.value}%`);
@@ -1512,8 +1684,30 @@ class Stream {
             set_style_property(this.video, "top", `${this.offset_y.value}%`);
             
             set_inner_html(this.info_element, this.name.value);
-            set_style_property(this.stage_element, "--color", this.color.value);
-            set_style_property(this.stage_element, "order", this.index);
+
+            set_text(this.header_name_element, this.name.value);
+            set_text(this.header_score_element, format_score(this.score.value));
+
+            set_text(this.header_name_element2, this.name.value);
+            set_text(this.header_score_element2,  format_positional(this.position+1));
+            set_style_property(this.stream_container, "--color", this.color.value);
+            set_style_property(this.stream_container, "order", this.index);
+            set_style_property(this.header_element, "order", this.index);
+            set_style_property(this.header_element2, "order", this.position);
+            set_style_property(this.header_element, "--color", this.color.value);
+            set_style_property(this.header_element, "--color2", color2.hex());
+            set_style_property(this.header_element2, "--color", this.color.value);
+            set_style_property(this.header_element2, "--color2", color2.hex());
+            set_style_property(this.stream_container, "--color", this.color.value);
+    
+            var status = "online";
+            if (this.offline_persistant) status = "offline";
+            else if (this.is_buffering) status = "buffering";
+            set_attribute(this.stream_container, "data-status", status);
+    
+            toggle_class(this.stream_container, "selected", this.selected.value);
+    
+            if (this.video.paused) this.video.play();
         } else {
             this.remove_from_stage();
         }
@@ -1544,24 +1738,6 @@ class Stream {
             this.bitrate.value = 0;
         }
 
-        set_text(this.header_name_element, this.name.value);
-        set_text(this.header_score_element, this.score.value);
-        set_style_property(this.header_element, "--color", this.color.value);
-        var color2 = Color(this.color.value);
-        if (color2.lightness() > 50) color2 = color2.darken(0.1)
-        else color2 = color2.lighten(0.1)
-        set_style_property(this.header_element, "--color2", color2.hex());
-        set_style_property(this.stage_element, "--color", this.color.value);
-
-        var status = "online";
-        if (this.offline_persistant) status = "offline";
-        else if (this.is_buffering) status = "buffering";
-        set_attribute(this.stage_element, "data-status", status);
-
-        toggle_class(this.stage_element, "selected", this.selected.value);
-
-        if (this.video.paused) this.video.play();
-
         this.last_update_time = now;
     }
 
@@ -1588,7 +1764,7 @@ class Challenge extends events.EventEmitter {
     round = null;
 
     get index() { return $(this.properties).index(); }
-    get is_active() { return this.status.value >= ChallengeStatus.active_pending && this.status.value <= ChallengeStatus.active_finished; }
+    get is_active() { return this.status.value >= ChallengeStatus.active_pending[0] && this.status.value <= ChallengeStatus.active_finished[0]; }
     
     static get_challenges() {
         return Array.from(CHALLENGES).sort((a,b)=>a.index-b.index);
@@ -1602,7 +1778,7 @@ class Challenge extends events.EventEmitter {
         return Array.from(this.secondaries).sort((a,b)=>a.index-b.index);
     }
 
-    get next_status() { return (+this.status.value+1) % (ChallengeStatus.archived+1) } 
+    get next_status() { return (+this.status.value+1) % (ChallengeStatus.archived[0]+1) } 
 
     constructor() {
         super();
@@ -1623,19 +1799,16 @@ class Challenge extends events.EventEmitter {
         this.add_secondary_button = create_button(null, "Add Secondary", ()=>new ChallengeSecondary(this));
         this.secondaries_list.append(this.add_secondary_button);
 
-        this.time_limit = create_property("time_limit", `Time Limit`, create_time_input(20*60));
+        this.time_limit = create_property("time_limit", `Time Limit`, create_time_input(20*60*1000));
         this.properties.append(this.time_limit);
 
-        this.run_off_time = create_property("run_off_time", `Run-off Time`, create_time_input(5*60));
+        this.run_off_time = create_property("run_off_time", `Run-off Time`, create_time_input(5*60*1000));
         this.properties.append(this.run_off_time);
 
         this.status = create_property("status", `Status`, `<select></select>`);
-        this.status.add_option(ChallengeStatus.inactive, "Inactive / Reset");
-        this.status.add_option(ChallengeStatus.active_pending, "Start (pending)");
-        this.status.add_option(ChallengeStatus.active, "Start");
-        this.status.add_option(ChallengeStatus.active_finishing, "Ending soon");
-        this.status.add_option(ChallengeStatus.active_finished, "End");
-        this.status.add_option(ChallengeStatus.archived, "Archived");
+        for (var k in ChallengeStatus) {
+            this.status.add_option(...ChallengeStatus[k]);
+        }
         this.properties.append(this.status);
         this.status.addEventListener("update", ()=>setImmediate(()=>this.#on_status_change()));
 
@@ -1659,18 +1832,18 @@ class Challenge extends events.EventEmitter {
     // onload the statuis var is not last so partially loaded challenge gets on_status_change() too early
 
     #on_status_change() {
-        console.log("on_status_change", this.status.value)
+        // console.log("on_status_change", this.status.value)
         if (this.is_active) {
             for (var c of Challenge.get_challenges()) {
                 if (c == this) continue;
-                if (c.is_active) c.status.value = ChallengeStatus.inactive;
+                if (c.is_active) c.status.value = ChallengeStatus.inactive[0];
             }
-            if (!window.round || (window.round && window.round.challenge != this)) {
+            if (!round || (round && round.challenge != this)) {
                 new Round(this);
             }
         }
 
-        if (this.status.value == ChallengeStatus.inactive) {
+        if (this.status.value == ChallengeStatus.inactive[0]) {
             challenges.inactive_challenges.layout.append(this.properties);
         } else if (this.is_active) {
             challenges.active_challenges.layout.append(this.properties);
@@ -1720,17 +1893,6 @@ class Challenge extends events.EventEmitter {
     }
 }
 
-
-class ChallengeStatus {
-    static inactive = 0;
-    static active_pending = 1;
-    static active = 2;
-    static active_finishing = 3;
-    static active_finished = 4;
-    static archived = 5;
-    // static pending = 1;
-}
-
 class ChallengeSecondary {
     get index() { return $(this.layout).index() }
 
@@ -1764,12 +1926,13 @@ class ChallengeSecondary {
 }
 
 class RoundResult {
-
+    _position = -1;
+    get position() { return this._position }
     get index() { return $(this.layout).index() }
 
     get main_score() {
-        if (this.round.challenge.is_positional.value) return calculate_scoring(this.round.num_players)[this.calculate_position()-1];
-        return this.score.value;
+        if (this.round.challenge.is_positional.value) return calculate_scoring(this.round.num_players)[this.position];
+        else return this.score.value;
     }
 
     get secondary_score_breakdown() {
@@ -1777,36 +1940,37 @@ class RoundResult {
         var secondaries = round.challenge.get_secondaries();
         var results = [];
         for (var i = 0; i < Math.min(secondary_scores.length, secondaries.length); i++) {
-            results.push(secondaries[i].score.value * secondary_scores[i]);
+            var v = secondaries[i].score.value * secondary_scores[i];
+            if (v != 0) results.push(v);
         }
         return results;
     }
 
-    get secondary_score_total() {
-        var val = 0;
-        for (var s of this.secondary_score_breakdown) val += s;
-        return val;
-    }
+    get extra_score() { return this.extra.value; }
 
     get score_breakdown() {
-        var scores = [this.main_score, ...this.secondary_score_breakdown()];
+        var scores = [this.main_score, ...this.secondary_score_breakdown];
         if (this.extra_score) scores.push(this.extra_score);
         return scores;
     }
 
-    get extra_score() { return this.extra.value; }
+    get total_score() { return utils.sum(this.score_breakdown); }
 
-    get total_score() { return this.main_score + this.secondary_score_total + this.extra_score; }
-
-    calculate_position() {
-        if (this.position_joint_above.value) {
-            var previous = $(this.layout).prev()[0];
-            if (previous) {
-                return this.round.get_result_from_element(previous).calculate_position()
+    /* get position() {
+        if (this.round.challenge.is_positional.value) {
+            if (this.position_joint_above.value) {
+                var previous = $(this.layout).prev()[0];
+                if (previous) {
+                    return this.round.get_result_from_element(previous).position;
+                }
             }
+            return this.index;
+        } else {
+            var results = this.round.get_results();
+            var index = results.findIndex((r)=>r===this);
+            return calculate_positions(results.map(r.total_score))[index];
         }
-        return this.index+1;
-    }
+    } */
 
     constructor(round, stream) {
         this.round = round;
@@ -1824,8 +1988,8 @@ class RoundResult {
         this.position_group = create_layout("position_group");
         this.position_group.classList.add("horizontal", "noscroll");
         this.position_group.append(create_label("Position"));
-        this.position = create_property("position", null, `<input type="number" value="0" disabled>`);
-        this.position_group.append(this.position);
+        this.position_elem = create_property("position", null, `<input type="number" value="0" disabled>`);
+        this.position_group.append(this.position_elem);
         this.position_joint_above = create_property("position_joint", null, `<input type="checkbox" title="Same as above">`);
         this.position_group.append(this.position_joint_above);
         this.layout.append(this.position_group);
@@ -1850,7 +2014,7 @@ class RoundResult {
         
         this.pos_btn = create_button(null, `Declare`, ()=>{
             play_sound("assets/success_2.wav")
-            var text = this.round.challenge.is_positional.value ? `${num_to_positional(this.position.value)}` : `WINNER`;
+            var text = this.round.challenge.is_positional.value ? `${format_positional(this.position+1)}` : `WINNER!`;
             var final_position = $(`<div class="final-position"><span>${text}</span></div>`)[0];
             this.stream.overlay_element.append(final_position);
             setTimeout(()=>final_position.remove(), 10000);
@@ -1884,7 +2048,7 @@ class RoundResult {
         toggle_class(this.secondaries_list, "display-none", secondaries.length==0);
 
         this.name.value = this.stream.name.value;
-        this.position.value = this.calculate_position();
+        this.position_elem.value = this.position;
         this.calculated_score.value = this.total_score;
     }
 
@@ -1945,7 +2109,6 @@ class Screen extends events.EventEmitter {
 class ChallengeStartScreen extends Screen {
     constructor(round) {
         super("Start Screen");
-        copy_text_to_clipboard(":regional_indicator_g: :regional_indicator_o:")
         this.round = round
         this.element.classList.add("countdown");
         utils.timeout(2000)
@@ -1968,6 +2131,11 @@ class ChallengeStartScreen extends Screen {
             this.emit("go")
             play_sound("assets/beep2.wav")
             $(this.element).append(`<div class="num">GO!</div>`)
+            
+            send_to_discord(format_discord_big("GO"));
+            
+            this.round.challenge.status.value = ChallengeStatus.active[0];
+
             return utils.timeout(1000)
         })
         .then(()=>{
@@ -2017,7 +2185,7 @@ class ChallengeDetailsScreen extends Screen {
             $(row).append(`<label>Scoring:</label>`)
             var table = $(`<div class="scoring_table"></div>`)[0]
             calculate_scoring(this.round.num_players).forEach((e,i)=>{
-                $(table).append(`<div><i>${num_to_positional(i+1)}</i> = <b>${format_score(e)}</b></div>`)
+                $(table).append(`<div><i>${format_positional(i+1)}</i> = <b>${format_score(e)}</b></div>`)
             });
             $(row).append(table);
             box.append(row);
@@ -2042,13 +2210,13 @@ class ChallengeDetailsScreen extends Screen {
             $(box).append(`<div class="separator"></div>`);
             var row = $(`<div class="row"></div>`)[0];
             $(row).append(`<label>Time Limit:</label>`)
-            $(row).append(`<div class="time-limit">${utils.time_to_str(this.round.challenge.time_limit.value * 1000)}</div>`)
+            $(row).append(`<div class="time-limit">${utils.time_to_str(this.round.challenge.time_limit.value)}</div>`)
             box.append(row);
 
             if (this.round.challenge.run_off_time.value) {
                 var row = $(`<div class="row"></div>`)[0];
                 $(row).append(`<label>Run-off Time:</label>`)
-                $(row).append(`<div class="time-limit">${utils.time_to_str(this.round.challenge.run_off_time.value * 1000)}</div>`)
+                $(row).append(`<div class="time-limit">${utils.time_to_str(this.round.challenge.run_off_time.value)}</div>`)
                 box.append(row);
             }
         }
@@ -2063,7 +2231,7 @@ class ChallengeDetailsScreen extends Screen {
     }
 }
 
-class ChallengeResultsScreen extends Screen {
+class RoundResultsScreen extends Screen {
     round;
     constructor(round) {
         super();
@@ -2074,50 +2242,47 @@ class ChallengeResultsScreen extends Screen {
         setTimeout(()=>{
             play_sound("assets/round_over.mp3");
             this.element.append(this.box);
-        },1000)
+        }, 1000);
     }
+
     render() {
-        var box = document.createElement("div");
         this.title.value = `Round ${settings.round_num.value} Results`;
-        // this.element.classList.add("end")
         var title = $(`<div class="title">${this.title.value}</div>`)[0];
+        var box = document.createElement("div");
         box.append(title);
 
-        var results_div = $(`<div class="results"></div>`)[0];
-        var results = round.get_results();
-        results.forEach((result, i)=>{
-            var col = $(`<div class="result"></div>`)[0];
-            col.style.setProperty("--color", result.stream.color.value)
+        var table_elem = $(`<table class="results"><tbody></tbody></table>`)[0];
+        var tbody = table_elem.childNodes[0];
 
-            var position = result.calculate_position(); // 1 based
-            if (round.challenge.is_positional.value) {
-                $(col).append(`<div class="position">${num_to_positional(position)}</div>`);
-            }
-            $(col).append(`<div class="player">${result.name.value}</div>`);
-            
-            $(col).append(`<div class="score">${format_score(result.main_score)}</div>`);
-
-            var extra_scores = [];
-            for (var s of result.secondary_score_breakdown) {
-                if (s != 0) extra_scores.push(s);
-            }
-            if (result.extra.value != 0) extra_scores.push(result.extra.value);
-            
-            if (extra_scores.length) {
-                for (var s of extra_scores) {
-                    $(col).append(`<div class="extra">${format_score(s)}</div>`);
-                }
-                
-                $(col).append(`<div class="separator"></div>`);
-                $(col).append(`<div class="score">${format_score(result.total_score)}</div>`);
-            }
-
-            results_div.append(col);
+        var results = this.round.get_results();
+        this.round.calculate_positions(results);
+        results = results.map(r=>{
+            var position = format_positional(r.position+1);
+            var name = r.stream.name.value;
+            var score = format_score(r.total_score);
+            var breakdown = r.score_breakdown;
+            breakdown = (breakdown.length > 1) ? format_score_breakdown(breakdown) : undefined;
+            return {
+                position,
+                name,
+                score,
+                breakdown,
+            };
         });
-        box.append(results_div)
+        if (results.every(r=>r.breakdown===undefined)) {
+            results.forEach(r=>delete r.breakdown);
+        }
+        var table = results.map((r)=>Object.keys(r).map(k=>`<td class="${k}">${r[k]}</td>`));
+        table = mathjs.transpose(table);
 
-        set_inner_html(this.box, box.innerHTML)
+        tbody.innerHTML = table.map((r)=>`<tr>${r.join("")}</tr>`).join("");
+        // Array.from(tbody.getElementsByClassName("name")).map(e=>e.style.setProperty("--color", this.color))
+
+        box.append(table_elem);
+
+        set_inner_html(this.box, box.innerHTML);
     }
+
     update() {
         super.update();
         this.render();
@@ -2158,24 +2323,14 @@ function api_refresh() {
     });
 }
 
-var curr_layout;
 function recalculate_layout() {
-    // const container_width = stage_wrapper.getBoundingClientRect().width;
-    // const container_height = stage_wrapper.getBoundingClientRect().height;
-    const container_width = stage_wrapper.offsetWidth;
-    const container_height = stage_wrapper.offsetHeight;
-
-
-    /* const body_rect = document.body.getBoundingClientRect();
-    const header_rect = header_wrapper.getBoundingClientRect();
-    const footer_rect = footer_wrapper.getBoundingClientRect();
-    const container_height = body_rect.height - header_rect.height - footer_rect.height - 10;
-    const container_width = body_rect.width - 10; */
+    const container_width = stage.offsetWidth;
+    const container_height = stage.offsetHeight;
 
     var streams = Stream.get_visible_streams();
     const num_videos = streams.length;
     var aspect_ratio = settings.aspect_ratio;
-    let best_layout = {
+    let layout = {
         area: 0,
         cols: 0,
         rows: 0,
@@ -2198,26 +2353,39 @@ function recalculate_layout() {
             width = Math.floor(height * aspect_ratio);
         }
         const area = width * height;
-        if (area > best_layout.area) {
-            best_layout = {
+        if (area > layout.area) {
+            layout = {
                 area,
                 width,
                 height,
                 rows,
-                cols,
-                container_width,
-                container_height
+                cols
             };
         }
     }
-    var row_height = Math.floor(container_height/best_layout.rows);
-    if (JSON.stringify(best_layout) != JSON.stringify(curr_layout)) {
-        curr_layout = best_layout;
-        set_style_property(stage_wrapper, "--width", `${best_layout.width}px`);
-        set_style_property(stage_wrapper, "--height", `${best_layout.height}px`);
-        set_style_property(stage_wrapper, "--row-height", `${row_height}px`);
-        set_style_property(stage_wrapper, "--cols", `${best_layout.cols}`);
-        set_style_property(stage_wrapper, "--rows", `${best_layout.rows}`);
+    var num_rows = layout.rows;
+    var row_height = Math.floor(container_height/layout.rows);
+    var row_width = layout.cols * layout.width;
+
+    if (settings.crop_video.value) layout.height = row_height;
+    for (var i=0; i<num_videos; i++) {
+        var stream = streams[i];
+        var elem = stream.stream_container;
+        var row = Math.floor(i/layout.cols);
+        var col = i % layout.cols;
+        var num_cols = Math.min(layout.cols, num_videos - (row * layout.cols));
+        var col_width = layout.width;
+        var row_height = layout.height;
+        var top = (row+1) * (container_height - row_height * num_rows) / (num_rows + 1) + (row * row_height);
+        var left = (col+1) * (row_width - col_width * num_cols) / (num_cols + 1) + (col * col_width) + (container_width - row_width) / 2;
+        // pad_left += ((row_width / layout.cols) - layout.width) / 2;
+        // pad_left += ((row_width - num_on_row * layout.width) / (num_on_row * 2));
+        //(container_width - num_on_row * layout.width) / 2;
+        set_style_property(elem, "width", `${col_width}px`);
+        set_style_property(elem, "height", `${row_height}px`);
+        set_style_property(elem, "top", `${top}px`);
+        set_style_property(elem, "left", `${left}px`);
+        // set_style_property(elem, "margin", `${pad_top}px ${pad_left}px`);
     }
 }
 /* var custom_css_props = ["--width", "--height", "--row-height"];
@@ -2243,20 +2411,24 @@ var header_timeline;
 function update_header() {
     if (header_timeline) header_timeline.stop();
     header_timeline = new Timeline([
-        ()=>header.style.setProperty("top", `0`),
-        settings.header_title_duration.value * 1000,
+        ()=>{
+            header.style.setProperty("top", `0`);
+            setTimeout(()=>header_positions.style.setProperty("opacity", `0.0`), 500);
+        },
+        settings.header_title_duration.value,
         ()=>header.style.setProperty("top", `-100%`),
-        settings.header_scores_duration.value * 1000
+        settings.header_scores_duration.value,
+        ()=>header_positions.style.setProperty("opacity", `1.0`),
+        settings.header_positions_duration.value,
     ], { loop:true, autostart:true });
 }
 
-var footer_delay = 2000;
 var footer_timeline;
 function update_footer() {
     if (footer_timeline) footer_timeline.stop();
     footer_timeline = new Timeline([
         ()=>footer.style.setProperty("top", `0`),
-        settings.footer_title_duration.value * 1000,
+        settings.footer_title_duration.value,
         ()=>{
             if (!footer_info.firstChild) return;
             footer.style.setProperty("top", `-100%`)
@@ -2276,91 +2448,116 @@ function update_footer() {
     ], { loop:true, autostart:true });
 }
 
-//settings.footer_info_duration.value / 2 * 1000
-
 class Timeline {
-    i = -1;
-    total = 0;
-    running = false;
+    #i = -1;
+    #total = 0;
+    #is_running = false;
+    #timeline;
+    #options;
+
+    get is_running() { return this.#is_running; }
 
     constructor(timeline, options={}) {
-        this.timeline = timeline;
-        this.options = options;
+        this.#timeline = timeline;
+        this.#options = options;
         if (options.autostart) this.next();
     }
     
     next() {
-        this.total++;
-        this.i++;
-        this.curr();
-    }
-
-    curr(){
-        clearTimeout(this.timeout_id);
-        this.running = true;
+        this.#total++;
+        this.#i++;
+        this.#is_running = true;
         
-        if (this.i >= this.timeline.length && this.options.loop) {
-            if (typeof this.options.loop == "number") this.options.loop--;
-            this.i = 0;
+        if (this.#i >= this.#timeline.length && this.#options.loop) {
+            if (typeof this.#options.loop == "number") this.#options.loop--;
+            this.#i = 0;
         }
 
-        if (this.i >= this.timeline.length) {
+        if (this.#i >= this.#timeline.length) {
             this.stop();
             return;
         }
 
-        var total = this.total;
+        var total = this.#total;
         var next = ()=>{
-            if (this.total === total) this.next();
+            if (this.#total === total && this.#is_running) this.next();
         }
-        var type = typeof this.timeline[this.i];
+        var type = typeof this.#timeline[this.#i];
         if (type == "number") {
-            this.timeout_id = setTimeout(()=>next(), this.timeline[this.i]);
+            setTimeout(()=>next(), this.#timeline[this.#i]);
         } else if (type == "function") {
-            Promise.resolve(this.timeline[this.i]()).then(()=>next());
+            Promise.resolve(this.#timeline[this.#i]()).then(()=>next());
         } else {
-            console.log(`'${this.timeline[this.i]}' not a valid timeline entry. Waiting 1000ms...`)
-            this.timeout_id = setTimeout(()=>next(), 1000);
+            console.log(`'${this.#timeline[this.#i]}' not a valid timeline entry. Waiting 1000ms...`)
+            setTimeout(()=>next(), 1000);
         }
     }
 
     stop() {
-        this.running = false;
-        clearTimeout(this.timeout_id);
+        this.#is_running = false;
     }
 }
 
 class Timer extends events.EventEmitter {
     #stopwatch = new StopWatch();
-    #time_left = 0;
+    #total_time = 0;
     #interval_id;
+    #last_seconds_left;
+    static TICK_INTERVAL = 1000/60;
     
-    get time_left() { return Math.max(0, this.#time_left - this.#stopwatch.time); }
-    get finished() { return (this.#time_left - this.#stopwatch.time) <= 0; }
+    get time_left() { return Math.max(0, this.#total_time - this.#stopwatch.time); }
+    get seconds_left() { return Math.ceil(this.time_left/1000); }
+    get finished() { return this.time_left <= 0; }
     get paused() { return this.#stopwatch.paused; }
 
-    toggle_pause() {
-        this.#stopwatch.toggle_pause();
+    constructor() {
+        this.#stopwatch.on("pause", ()=>{
+            clearInterval(this.#interval_id);
+            this.emit("pause");
+        });
+        this.#stopwatch.on("start", ()=>{
+            this.#interval_id = setInterval(()=>this.#tick(), Timer.TICK_INTERVAL);
+            this.emit("start");
+        })
+        this.#stopwatch.on("reset", ()=>{
+            this.#last_seconds_left = this.seconds_left;
+            this.emit("reset");
+        })
     }
 
-    restart(time_left) {
-        this.#time_left = time_left;
+    restart(time) {
+        this.#total_time = time;
         this.#stopwatch.reset();
-        clearInterval(this.#interval_id);
-        this.#interval_id = setInterval(()=>{
-            if (this.finished) {
-                clearInterval(this.#interval_id);
-                this.emit("finish");
-            }
-        }, 1000/30);
+    }
+
+    #tick() {
+        var seconds_left = this.seconds_left;
+        for (var i = this.#last_seconds_left-1; i >= seconds_left; i--) {
+            this.emit("second", i);
+        }
+        this.#last_seconds_left = seconds_left;
+        this.emit("tick");
+        if (this.finished) {
+            clearInterval(this.#interval_id);
+            this.emit("finish");
+        }
     }
 
     pause() {
         this.#stopwatch.pause();
     }
 
+    resume() {
+        this.#stopwatch.resume();
+    }
+
     reset() {
         this.#stopwatch.reset();
+    }
+
+    destroy() {
+        this.#stopwatch.destroy();
+        this.removeAllListeners();
     }
 }
 
@@ -2376,21 +2573,27 @@ class StopWatch extends events.EventEmitter {
         if (!this.paused) return;
         this.#start_time += +new Date() - this.#pause_time;
         this.#pause_time = 0;
+        this.emit("start");
     }
     
-    toggle_pause() {
-        if (this.paused) this.start();
-        else this.pause();
+    resume() {
+        this.start();
     }
     
     pause() {
         if (this.paused) return;
         this.#pause_time = +new Date();
+        this.emit("pause");
     }
 
     reset() {
         this.#start_time = +new Date();
         if (this.paused) this.#pause_time = new Date();
+        this.emit("reset");
+    }
+
+    destroy() {
+        this.removeAllListeners();
     }
 }
 
@@ -2398,7 +2601,7 @@ class StopWatch extends events.EventEmitter {
 
 function tick() {
     var now = +new Date();
-    var delta = now - LAST_TICK;
+    var delta = now - last_tick;
 
     var stage_volume_target = 1.0;
     if (SCREENS.size) stage_volume_target = settings.stage_volume_screen.value;
@@ -2408,7 +2611,7 @@ function tick() {
 
     var visible_streams = Stream.get_visible_streams();
     for (var s of Stream.get_streams()) {
-        toggle_class(s.stage_element, "display-none", !visible_streams.includes(s));
+        toggle_class(s.stream_container, "display-none", !visible_streams.includes(s));
     }
 
     if (settings.always_one_stream_selected.value) {
@@ -2420,12 +2623,13 @@ function tick() {
         }
     }
     toggle_class(stage, "crop", settings.crop_video.value);
+    Stream.calculate_positions();
     for (var s of Stream.get_streams()) {
         s.update();
     }
     for (var c of Challenge.get_challenges()) {
         c.update();
-        if (window.round && window.round.challenge != c) {
+        if (round && round.challenge != c) {
             c.status.set_disabled(true)
         } else {
             c.status.set_disabled(false)
@@ -2444,14 +2648,14 @@ function tick() {
         rem *= window.innerHeight / 720;
     }
     set_text(round_name, `Round ${settings.round_num.value}`);
-    if (window.round) {
-        window.round.update();
+    if (round) {
+        round.update();
 
-        set_text(round_timer, utils.time_to_str(window.round.timer.time_left+999, "hh:mm:ss"));
-        toggle_class(round_timer, "finished", window.round.timer.time_left == 0);
-        set_text(footer_game, `${window.round.challenge.game.value}` || "N/A");
-        var parts = [nl2br(window.round.challenge.description.value, " ")];
-        for (var s of window.round.challenge.get_secondaries()) {
+        set_text(round_timer, utils.time_to_str(round.timer.time_left+999, "hh:mm:ss"));
+        toggle_class(round_timer, "finished", round.timer.time_left == 0);
+        set_text(footer_game, `${round.challenge.game.value}` || "N/A");
+        var parts = [nl2br(round.challenge.description.value, " ")];
+        for (var s of round.challenge.get_secondaries()) {
             parts.push(nl2br(s.descriptive_text, " "));
         }
         set_inner_html(footer_info, `<span>${parts.join(`<span class="marquee-separator">•</span>`)}</span>`);
@@ -2468,7 +2672,7 @@ function tick() {
 
     api_refresh_interval.interval = settings.api_refresh_interval.value;
     
-    LAST_TICK = now;
+    last_tick = now;
 }
 
 var streams = new Streams();
@@ -2523,7 +2727,7 @@ footer_wrapper.addEventListener("click", ()=>{
 // window.addEventListener("resize", ()=>debouncedRecalculateLayout());
 setInterval(()=>tick(), TICK_RATE);
 
-setInterval(()=>autosave(), autosave_interval);
+setInterval(()=>autosave(), AUTOSAVE_INTERVAL);
 window.addEventListener("beforeunload", ()=>{
     for (var w of CONTROL_PANELS) {
         w.destroy();
@@ -2549,18 +2753,19 @@ update_footer();
 x BETTER FORMATTING ON CONTROL PANEL ETC.
 x NORMALIZE MEGADRIVE AUDIO, REDUCE TO ABOUT 50% MAX
 x RECORD DESKTOP AUDIO AND GAME AUDIO SEPARATELY
+x MAKE PLAYER NAMES BETTER DEFINED ON STREAM
+x ORDER NAMES AT TOP OF SCREEN IN ORDER OF POSITION OVERALL AND SHOW POSITION NEXT TO NAME
+x LATENCY SEEMED TO GET BIGGER THE LONGER TOURNAMENT WENT ON, LOOK INTO.
+x PREVENT START SCREEN COUNTDOWN REPEATING ON RELOADING (ADD ANOTHER STATUS)
+x AUTO-POST DETAILS, RESULTS, TOTAL SCORES TO DISCORD
+- REQUEST ALL PLAYERS TO SUBMIT THEIR HIGH SCORES AND / OR SENCONDARY TASKS / PENALTIES AT THE END OF EVERY ROUND AUTOMATICALLY
 - AUTO-PROCEED AFTER ROUND START
-- PREVENT START SCREEN COUNTDOWN REPEATING ON RELOADING (ADD ANOTHER STATUS)
-- AUTO-POST DETAILS, RESULTS, TOTAL SCORES TO DISCORD
+- SEND DISCORD MESSAGES AS IMAGES OF RENDERED HTML?
+- SEND DISCORD MESSAGES WHEN TIME IS RUNNING OUT (5 MINS 1 MIN)
 - CONNECTION STATUS VISUALIZATION FOR EACH PLAYER, LAGGY, DROPPING FRAMES, ETC.
-- REQUEST ALL PLAYERS TO SUBMIT THEIR HIGH SCORES AND / OR SENCONDARY TASKS / PENALTIES AT THE END OF EVERY ROUND.
-- 5 players, max round score of 5
-- MAKE PLAYER NAMES BETTER DEFINED ON STREAM
 - RUN-OFF TIME MAKE CLEARER. REMOVE ALL TOGETHER?
-- ORDER NAMES AT TOP OF SCREEN IN ORDER OF POSITION OVERALL AND SHOW POSITION NEXT TO NAME
-- INDIVIDUAL PLAYER A/V SYNC (delay - easy, video faster NOT POSSIBLE?)
+- INDIVIDUAL PLAYER A/V SYNC (delay - easy, video faster - NOT POSSIBLE?)
 
 - TEST MIC LEVELS BEFORE GOING LIVE, MAKE MICS LOUDER THAN GAMES
 - DIRECT FEED TO DELETE FOR ISSUING IMPORTANT INFO TO PLAYERS
-- LATENCY SEEMED TO GET BIGGER THE LONGER TOURNAMENT WENT ON, LOOK INTO.
 */
